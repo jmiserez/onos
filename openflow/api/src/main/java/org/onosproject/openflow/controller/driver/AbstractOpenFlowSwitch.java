@@ -16,7 +16,11 @@
 
 package org.onosproject.openflow.controller.driver;
 
+import org.jboss.netty.buffer.ChannelBuffer;
+import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.Channel;
+import org.jboss.netty.handler.codec.base64.Base64;
+import org.jboss.netty.util.CharsetUtil;
 import org.onlab.packet.IpAddress;
 import org.onosproject.net.driver.AbstractHandlerBehaviour;
 import org.onosproject.openflow.controller.Dpid;
@@ -34,6 +38,7 @@ import org.projectfloodlight.openflow.protocol.OFPortDescStatsReply;
 import org.projectfloodlight.openflow.protocol.OFPortStatus;
 import org.projectfloodlight.openflow.protocol.OFRoleReply;
 import org.projectfloodlight.openflow.protocol.OFRoleRequest;
+import org.projectfloodlight.openflow.protocol.OFType;
 import org.projectfloodlight.openflow.protocol.OFVersion;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,6 +47,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -97,6 +103,7 @@ public abstract class AbstractOpenFlowSwitch extends AbstractHandlerBehaviour
     @Override
     public final void sendMsg(OFMessage m) {
         if (role == RoleState.MASTER && channel.isConnected()) {
+            hbSend(this, m);
             channel.write(Collections.singletonList(m));
         }
     }
@@ -104,6 +111,9 @@ public abstract class AbstractOpenFlowSwitch extends AbstractHandlerBehaviour
     @Override
     public final void sendMsg(List<OFMessage> msgs) {
         if (role == RoleState.MASTER && channel.isConnected()) {
+            for (OFMessage m : msgs) {
+                hbSend(this, m);
+            }
             channel.write(msgs);
         }
     }
@@ -199,6 +209,7 @@ public abstract class AbstractOpenFlowSwitch extends AbstractHandlerBehaviour
     @Override
     public final void handleMessage(OFMessage m) {
         if (this.role == RoleState.MASTER || m instanceof OFPortStatus) {
+            hbReceive(this, m);
             this.agent.processMessage(dpid, m);
         }
     }
@@ -425,6 +436,65 @@ public abstract class AbstractOpenFlowSwitch extends AbstractHandlerBehaviour
                 + " DPID[" + ((getStringId() != null) ? getStringId() : "?") + "]]";
     }
 
+    protected static final String HAPPENSBEFORE_MSG_IN =
+            "net.floodlightcontroller.happensbefore.HappensBefore.msgin";
+    protected static final List<OFType> IN_TYPES = Arrays.asList(
+            OFType.PACKET_IN, OFType.FLOW_REMOVED, OFType.BARRIER_REPLY, OFType.PORT_MOD);
+    protected static final List<OFType> OUT_TYPES = Arrays.asList(
+            OFType.PACKET_OUT, OFType.FLOW_MOD, OFType.BARRIER_REQUEST);
+    private static String hbCurrentmsgin = null;
 
+    private static String hbGetDpidString(AbstractOpenFlowSwitch sw) {
+        try {
+            return Long.toString(sw.getId()); // will throw RuntimeException if it is not yet assigned.
+        } catch (Exception e) {
+            return "?";
+        }
+    }
+
+    /*
+     * NOTE: if somehow the msg object is changed after the write was called,
+     *       it may be possible that this representation is not the same as
+     *       the one that is actually sent out, as Floodlight groups messages
+     *       before sending them.
+     */
+    protected static String hbFormatMsg(OFMessage msg, String swid) {
+        ChannelBuffer buf = ChannelBuffers.dynamicBuffer();
+        msg.writeTo(buf);
+        ChannelBuffer encoded = Base64.encode(buf);
+        String b64msg = encoded.toString(CharsetUtil.UTF_8).replace("\n", "");
+        return swid + ":" + b64msg;
+    }
+
+    public static void hbReceive(AbstractOpenFlowSwitch sw, OFMessage msg) {
+         String currentMsgString = hbFormatMsg(msg, hbGetDpidString(sw));
+
+        if (IN_TYPES.contains(msg.getType())) {
+            hbCurrentmsgin = currentMsgString;
+//            System.out.format(
+            sw.log.info(
+                "net.floodlightcontroller.happensbefore.HappensBefore-MessageIn-[" +
+                currentMsgString + "]");
+//            log.debug(msg.toString());
+//            System.out.flush();
+        }
+    }
+    public static void hbSend(AbstractOpenFlowSwitch sw, OFMessage msg) {
+        String currentMsgString = hbFormatMsg(msg, hbGetDpidString(sw));
+        if (OUT_TYPES.contains(msg.getType())) {
+//            log.debug(msg.toString());
+            String previousMsgString = hbCurrentmsgin;
+            if (previousMsgString == null) {
+                sw.log.error("currentMsgString was NULL.");
+            }
+            if (previousMsgString != null) {
+////                System.out.format(
+                sw.log.info(
+                    "net.floodlightcontroller.happensbefore.HappensBefore-MessageOut-[" +
+                    previousMsgString + ":" + currentMsgString + "]");
+////                System.out.flush();
+            }
+        }
+    }
 
 }
